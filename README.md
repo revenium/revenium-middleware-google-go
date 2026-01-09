@@ -16,23 +16,27 @@ A lightweight, production-ready middleware that adds **Revenium metering and tra
 - **Production Ready** - Battle-tested and optimized for production use
 - **Type Safe** - Built with Go's strong typing system
 
-## Getting Started
+## Getting Started (5 minutes)
 
-### 1. Create Project Directory
+### Step 1: Create Your Project
 
 ```bash
-# Create project directory
 mkdir my-google-ai-project
 cd my-google-ai-project
-
-# Initialize Go module
 go mod init my-google-ai-project
-
-# Install Revenium middleware
-go get github.com/revenium/revenium-middleware-google-go
 ```
 
-### 2. Create Environment File
+### Step 2: Install Dependencies
+
+```bash
+go get google.golang.org/genai
+go get github.com/revenium/revenium-middleware-google-go
+go mod tidy
+```
+
+This installs both the Google AI SDK and the Revenium middleware.
+
+### Step 3: Create Environment File
 
 Create a `.env` file in your project root with your API keys:
 

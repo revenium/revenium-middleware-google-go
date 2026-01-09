@@ -17,8 +17,6 @@ import (
 const (
 	defaultReveniumBaseURL = "https://api.revenium.ai"
 	meteringEndpoint       = "/meter/v2/ai/completions"
-	middlewareSource       = "go"
-	userAgent              = "revenium-middleware-google-go/1.0"
 	defaultCostType        = "AI"
 	defaultOperationType   = "CHAT"
 )
@@ -478,7 +476,7 @@ func buildGoogleMeteringPayloadWithTiming(
 		"requestTime":             requestTimeISO,
 		"completionStartTime":     completionStartTimeISO,
 		"timeToFirstToken":        timeToFirstToken,
-		"middlewareSource":        middlewareSource,
+		"middlewareSource":        GetMiddlewareSource(),
 	}
 
 	// Add error reason if there was an error
@@ -619,7 +617,7 @@ func sendMeteringRequest(config *Config, payload map[string]interface{}) error {
 
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("x-api-key", config.ReveniumAPIKey)
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", GetUserAgent())
 
 	// Send request with timeout
 	client := &http.Client{
