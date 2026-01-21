@@ -19,6 +19,9 @@ type Config struct {
 
 	VertexDisabled bool
 	Debug          bool
+
+	// Prompt capture configuration (opt-in)
+	CapturePrompts bool
 }
 
 // Option is a functional option for configuring Config
@@ -66,6 +69,15 @@ func WithDebug(debug bool) Option {
 	}
 }
 
+// WithCapturePrompts enables or disables prompt capture for analytics
+// When enabled, system prompts, input messages, and output responses are captured
+// and sent to Revenium for analytics (with truncation at 50,000 characters)
+func WithCapturePrompts(capture bool) Option {
+	return func(c *Config) {
+		c.CapturePrompts = capture
+	}
+}
+
 // loadFromEnv loads configuration from environment variables and .env files
 func (c *Config) loadFromEnv() error {
 	// First, try to load .env files automatically
@@ -87,7 +99,8 @@ func (c *Config) loadFromEnv() error {
 		c.VertexDisabled = true
 	}
 
-	c.Debug = os.Getenv("REVENIUM_DEBUG") == "true"
+	c.Debug = os.Getenv("REVENIUM_DEBUG") == "true" || os.Getenv("REVENIUM_DEBUG") == "1"
+	c.CapturePrompts = os.Getenv("REVENIUM_CAPTURE_PROMPTS") == "true" || os.Getenv("REVENIUM_CAPTURE_PROMPTS") == "1"
 
 	// Initialize logger early so we can use it
 	InitializeLogger()

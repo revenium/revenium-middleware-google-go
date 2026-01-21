@@ -228,6 +228,20 @@ func (m *ModelsInterface) GenerateContent(
 
 	Debug("GenerateContent called with model: %s", model)
 
+	// Detect vision content in the request
+	visionResult := DetectVisionContent(contents)
+	if visionResult.HasVisionContent {
+		Debug("Vision content detected: %d images, %d bytes", visionResult.ImageCount, visionResult.TotalImageSizeBytes)
+	}
+
+	// Extract prompts if capture is enabled
+	var promptData *PromptData
+	if m.config.CapturePrompts {
+		data := ExtractPromptsFromRequest(contents, config)
+		promptData = &data
+		Debug("Prompt capture enabled, extracted prompts")
+	}
+
 	// Record start time for duration calculation
 	requestTime := time.Now()
 
@@ -244,9 +258,16 @@ func (m *ModelsInterface) GenerateContent(
 		m.parent.wg.Add(1)
 		go func() {
 			defer m.parent.wg.Done()
-			m.sendMeteringDataWithTiming(ctx, nil, model, metadata, false, requestTime, completionStartTime, responseTime, config, err)
+			m.sendMeteringDataWithPrompts(ctx, nil, model, metadata, false, requestTime, completionStartTime, responseTime, config, err, visionResult, promptData)
 		}()
 		return nil, err
+	}
+
+	// Extract response content for prompt capture
+	if promptData != nil {
+		responseData := ExtractResponseContent(resp, promptData.PromptsTruncated)
+		promptData.OutputResponse = responseData.OutputResponse
+		promptData.PromptsTruncated = responseData.PromptsTruncated
 	}
 
 	// Calculate duration
@@ -258,7 +279,7 @@ func (m *ModelsInterface) GenerateContent(
 	m.parent.wg.Add(1)
 	go func() {
 		defer m.parent.wg.Done()
-		m.sendMeteringDataWithTiming(ctx, resp, model, metadata, false, requestTime, completionStartTime, responseTime, config, nil)
+		m.sendMeteringDataWithPrompts(ctx, resp, model, metadata, false, requestTime, completionStartTime, responseTime, config, nil, visionResult, promptData)
 	}()
 
 	return resp, nil
@@ -276,6 +297,20 @@ func (m *ModelsInterface) GenerateContentStream(
 
 	Debug("GenerateContentStream called with model: %s", model)
 
+	// Detect vision content in the request
+	visionResult := DetectVisionContent(contents)
+	if visionResult.HasVisionContent {
+		Debug("Vision content detected: %d images, %d bytes", visionResult.ImageCount, visionResult.TotalImageSizeBytes)
+	}
+
+	// Extract prompts if capture is enabled
+	var promptData *PromptData
+	if m.config.CapturePrompts {
+		data := ExtractPromptsFromRequest(contents, config)
+		promptData = &data
+		Debug("Prompt capture enabled for streaming, extracted prompts")
+	}
+
 	// Record start time for duration calculation
 	requestTime := time.Now()
 
@@ -287,12 +322,26 @@ func (m *ModelsInterface) GenerateContentStream(
 		var lastUsage *genai.GenerateContentResponseUsageMetadata
 		var completionStartTime time.Time
 		var firstTokenReceived bool
+		var accumulatedContent string
 		chunkCount := 0
 
 		for resp, err := range stream {
 			if err != nil {
 				Debug("Stream error after %d chunks: %v", chunkCount, err)
 				responseTime := time.Now()
+
+				// Finalize prompt data with accumulated content
+				var finalPromptData *PromptData
+				if promptData != nil {
+					streamData := ExtractStreamingResponseContent(accumulatedContent, promptData.PromptsTruncated)
+					finalPromptData = &PromptData{
+						SystemPrompt:     promptData.SystemPrompt,
+						InputMessages:    promptData.InputMessages,
+						OutputResponse:   streamData.OutputResponse,
+						PromptsTruncated: streamData.PromptsTruncated,
+					}
+				}
+
 				// Send metering before yielding error
 				if lastUsage != nil {
 					if !firstTokenReceived {
@@ -301,14 +350,14 @@ func (m *ModelsInterface) GenerateContentStream(
 					m.parent.wg.Add(1)
 					go func() {
 						defer m.parent.wg.Done()
-						m.sendMeteringDataWithTiming(ctx, &genai.GenerateContentResponse{UsageMetadata: lastUsage}, model, metadata, true, requestTime, completionStartTime, responseTime, config, err)
+						m.sendMeteringDataWithPrompts(ctx, &genai.GenerateContentResponse{UsageMetadata: lastUsage}, model, metadata, true, requestTime, completionStartTime, responseTime, config, err, visionResult, finalPromptData)
 					}()
 				} else {
 					// No usage data, but still send error metering
 					m.parent.wg.Add(1)
 					go func() {
 						defer m.parent.wg.Done()
-						m.sendMeteringDataWithTiming(ctx, nil, model, metadata, true, requestTime, responseTime, responseTime, config, err)
+						m.sendMeteringDataWithPrompts(ctx, nil, model, metadata, true, requestTime, responseTime, responseTime, config, err, visionResult, finalPromptData)
 					}()
 				}
 				if !yield(nil, err) {
@@ -330,16 +379,34 @@ func (m *ModelsInterface) GenerateContentStream(
 				lastUsage = resp.UsageMetadata
 			}
 
+			// Accumulate content for prompt capture
+			if promptData != nil {
+				accumulatedContent += resp.Text()
+			}
+
 			// Yield the response
 			if !yield(resp, nil) {
 				// Stream was stopped, send metering
 				Debug("Stream stopped by consumer after %d chunks", chunkCount)
 				responseTime := time.Now()
+
+				// Finalize prompt data with accumulated content
+				var finalPromptData *PromptData
+				if promptData != nil {
+					streamData := ExtractStreamingResponseContent(accumulatedContent, promptData.PromptsTruncated)
+					finalPromptData = &PromptData{
+						SystemPrompt:     promptData.SystemPrompt,
+						InputMessages:    promptData.InputMessages,
+						OutputResponse:   streamData.OutputResponse,
+						PromptsTruncated: streamData.PromptsTruncated,
+					}
+				}
+
 				if lastUsage != nil {
 					m.parent.wg.Add(1)
 					go func() {
 						defer m.parent.wg.Done()
-						m.sendMeteringDataWithTiming(ctx, &genai.GenerateContentResponse{UsageMetadata: lastUsage}, model, metadata, true, requestTime, completionStartTime, responseTime, config, nil)
+						m.sendMeteringDataWithPrompts(ctx, &genai.GenerateContentResponse{UsageMetadata: lastUsage}, model, metadata, true, requestTime, completionStartTime, responseTime, config, nil, visionResult, finalPromptData)
 					}()
 				}
 				return
@@ -348,19 +415,33 @@ func (m *ModelsInterface) GenerateContentStream(
 
 		// Stream completed successfully, send final metering
 		responseTime := time.Now()
+
+		// Finalize prompt data with accumulated content
+		var finalPromptData *PromptData
+		if promptData != nil {
+			streamData := ExtractStreamingResponseContent(accumulatedContent, promptData.PromptsTruncated)
+			finalPromptData = &PromptData{
+				SystemPrompt:     promptData.SystemPrompt,
+				InputMessages:    promptData.InputMessages,
+				OutputResponse:   streamData.OutputResponse,
+				PromptsTruncated: streamData.PromptsTruncated,
+			}
+		}
+
 		if lastUsage != nil {
 			duration := time.Since(requestTime)
 			Debug("Stream completed: %d chunks, %d total tokens in %v", chunkCount, lastUsage.TotalTokenCount, duration)
 			m.parent.wg.Add(1)
 			go func() {
 				defer m.parent.wg.Done()
-				m.sendMeteringDataWithTiming(ctx, &genai.GenerateContentResponse{UsageMetadata: lastUsage}, model, metadata, true, requestTime, completionStartTime, responseTime, config, nil)
+				m.sendMeteringDataWithPrompts(ctx, &genai.GenerateContentResponse{UsageMetadata: lastUsage}, model, metadata, true, requestTime, completionStartTime, responseTime, config, nil, visionResult, finalPromptData)
 			}()
 		}
 	}
 }
 
 // sendMeteringDataWithTiming sends metering data with precise timing information
+// Deprecated: Use sendMeteringDataWithTimingAndVision for vision support
 func (m *ModelsInterface) sendMeteringDataWithTiming(
 	ctx context.Context,
 	resp *genai.GenerateContentResponse,
@@ -373,14 +454,32 @@ func (m *ModelsInterface) sendMeteringDataWithTiming(
 	config *genai.GenerateContentConfig,
 	err error,
 ) {
+	// Delegate to vision-aware version with empty vision result
+	m.sendMeteringDataWithTimingAndVision(ctx, resp, model, metadata, isStreamed, requestTime, completionStartTime, responseTime, config, err, VisionDetectionResult{})
+}
+
+// sendMeteringDataWithTimingAndVision sends metering data with timing and vision information
+func (m *ModelsInterface) sendMeteringDataWithTimingAndVision(
+	ctx context.Context,
+	resp *genai.GenerateContentResponse,
+	model string,
+	metadata map[string]interface{},
+	isStreamed bool,
+	requestTime time.Time,
+	completionStartTime time.Time,
+	responseTime time.Time,
+	config *genai.GenerateContentConfig,
+	err error,
+	visionResult VisionDetectionResult,
+) {
 	defer func() {
 		if r := recover(); r != nil {
 			Error("Metering goroutine panic: %v", r)
 		}
 	}()
 
-	// Build metering payload with precise timing
-	payload := buildGoogleMeteringPayloadWithTiming(
+	// Build metering payload with precise timing and vision info
+	payload := buildGoogleMeteringPayloadWithTimingAndVision(
 		resp,
 		model,
 		metadata,
@@ -391,7 +490,58 @@ func (m *ModelsInterface) sendMeteringDataWithTiming(
 		m.provider.String(),
 		config,
 		err,
+		visionResult,
 	)
+
+	// Send to Revenium API with retry logic
+	Debug("[METERING] About to send metering data...")
+	if err := sendMeteringWithRetry(m.config, payload); err != nil {
+		Error("Failed to send metering data: %v", err)
+	} else {
+		Debug("[METERING] Metering data sent successfully")
+	}
+}
+
+// sendMeteringDataWithPrompts sends metering data with prompt capture information
+func (m *ModelsInterface) sendMeteringDataWithPrompts(
+	ctx context.Context,
+	resp *genai.GenerateContentResponse,
+	model string,
+	metadata map[string]interface{},
+	isStreamed bool,
+	requestTime time.Time,
+	completionStartTime time.Time,
+	responseTime time.Time,
+	config *genai.GenerateContentConfig,
+	err error,
+	visionResult VisionDetectionResult,
+	promptData *PromptData,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			Error("Metering goroutine panic: %v", r)
+		}
+	}()
+
+	// Build metering payload with precise timing and vision info
+	payload := buildGoogleMeteringPayloadWithTimingAndVision(
+		resp,
+		model,
+		metadata,
+		isStreamed,
+		requestTime,
+		completionStartTime,
+		responseTime,
+		m.provider.String(),
+		config,
+		err,
+		visionResult,
+	)
+
+	// Add prompt capture data if provided
+	if promptData != nil {
+		AddPromptDataToPayload(payload, *promptData)
+	}
 
 	// Send to Revenium API with retry logic
 	Debug("[METERING] About to send metering data...")
@@ -408,6 +558,7 @@ func generateRequestID() string {
 }
 
 // buildGoogleMeteringPayloadWithTiming builds a metering payload with precise timing information
+// Deprecated: Use buildGoogleMeteringPayloadWithTimingAndVision for vision support
 func buildGoogleMeteringPayloadWithTiming(
 	resp *genai.GenerateContentResponse,
 	model string,
@@ -419,6 +570,24 @@ func buildGoogleMeteringPayloadWithTiming(
 	provider string,
 	config *genai.GenerateContentConfig,
 	err error,
+) map[string]interface{} {
+	// Delegate to vision-aware version with empty vision result
+	return buildGoogleMeteringPayloadWithTimingAndVision(resp, model, metadata, isStreamed, requestTime, completionStartTime, responseTime, provider, config, err, VisionDetectionResult{})
+}
+
+// buildGoogleMeteringPayloadWithTimingAndVision builds a metering payload with timing and vision information
+func buildGoogleMeteringPayloadWithTimingAndVision(
+	resp *genai.GenerateContentResponse,
+	model string,
+	metadata map[string]interface{},
+	isStreamed bool,
+	requestTime time.Time,
+	completionStartTime time.Time,
+	responseTime time.Time,
+	provider string,
+	config *genai.GenerateContentConfig,
+	err error,
+	visionResult VisionDetectionResult,
 ) map[string]interface{} {
 	// Format timestamps as ISO 8601
 	requestTimeISO := requestTime.UTC().Format(time.RFC3339)
@@ -556,6 +725,23 @@ func buildGoogleMeteringPayloadWithTiming(
 		}
 		if parentTransactionId, ok := metadata["parentTransactionId"]; ok {
 			payload["parentTransactionId"] = parentTransactionId
+		}
+	}
+
+	// Add vision content information
+	if visionResult.HasVisionContent {
+		payload["hasVisionContent"] = true
+		// Add vision attributes for detailed analytics
+		visionAttrs := BuildVisionAttributes(visionResult)
+		if visionAttrs != nil {
+			// Merge vision attributes into payload
+			if existingAttrs, ok := payload["attributes"].(map[string]interface{}); ok {
+				for k, v := range visionAttrs {
+					existingAttrs[k] = v
+				}
+			} else {
+				payload["attributes"] = visionAttrs
+			}
 		}
 	}
 
