@@ -2,7 +2,7 @@ name: Branch Protection Bypass Alert
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop, enterprise]
 
 jobs:
   check-bypass:
@@ -10,25 +10,46 @@ jobs:
     steps:
       - name: Check if push was via PR merge
         id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          COMMIT_MSG="${{ github.event.head_commit.message }}"
-          # PR merges start with "Merge pull request" or contain "(#123)" for squash merges
-          if [[ "$COMMIT_MSG" =~ ^Merge\ pull\ request ]] || [[ "$COMMIT_MSG" =~ \(#[0-9]+\) ]]; then
+          echo "Checking commit ${{ github.sha }}..."
+
+          # Query GitHub API for PRs associated with this commit
+          # Using --jq directly avoids pipe encoding issues
+          MERGED_AT=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            --jq '.[0].merged_at // "null"' 2>/dev/null) || MERGED_AT="error"
+
+          if [ "$MERGED_AT" = "error" ]; then
+            echo "⚠ API error - could not verify PR association"
+            echo "skip=false" >> $GITHUB_OUTPUT
+          elif [ "$MERGED_AT" != "null" ] && [ -n "$MERGED_AT" ]; then
+            PR_NUM=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+              --jq '.[0].number' 2>/dev/null)
+            echo "✓ Commit came from merged PR #$PR_NUM (merged at $MERGED_AT)"
             echo "skip=true" >> $GITHUB_OUTPUT
           else
+            echo "⚠ No merged PR found - possible direct push or bypass"
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Send Slack DM alert
+      - name: Send Slack alert
         if: steps.check.outputs.skip == 'false'
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_USER_ID: ${{ secrets.SLACK_ADMIN_USER_ID }}
         run: |
-          curl -X POST https://slack.com/api/chat.postMessage \
+          # Escape special characters for JSON
+          COMMIT_MSG=$(cat << 'MSGEOF'
+          ${{ github.event.head_commit.message }}
+          MSGEOF
+          )
+          ESCAPED_MSG=$(echo "$COMMIT_MSG" | head -1 | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr -d '\n\r')
+
+          curl -s -X POST https://slack.com/api/chat.postMessage \
             -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
             -H "Content-Type: application/json" \
             -d "{
               \"channel\": \"$SLACK_USER_ID\",
-              \"text\": \":warning: *Branch Protection Bypass Detected*\n\n*Repo:* ${{ github.repository }}\n*Branch:* ${{ github.ref_name }}\n*Pusher:* ${{ github.actor }}\n*Commit:* \`${{ github.sha }}\`\n*Message:* ${{ github.event.head_commit.message }}\n\n<${{ github.event.head_commit.url }}|View Commit>\"
+              \"text\": \":warning: *Branch Protection Bypass Detected*\\n\\n*Repo:* ${{ github.repository }}\\n*Branch:* ${{ github.ref_name }}\\n*Pusher:* ${{ github.actor }}\\n*Commit:* \`${{ github.sha }}\`\\n*Message:* ${ESCAPED_MSG}\\n\\n<${{ github.event.head_commit.url }}|View Commit>\"
             }"
