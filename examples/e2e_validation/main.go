@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/revenium/revenium-middleware-google-go/revenium"
@@ -115,6 +116,7 @@ func main() {
 	if uiURL == "" {
 		uiURL = "https://app.revenium.ai"
 	}
+	uiURL = strings.TrimSuffix(uiURL, "/")
 	fmt.Printf("\nTrace URL: %s/traces?traceId=%s\n", uiURL, traceID)
 
 	// Print all metadata sent for comparison
